@@ -43,6 +43,11 @@ extern I2SStream i2sInput;
 extern StreamCopy micToWsCopier;
 extern volatile bool i2sInputFlushScheduled;
 
+// ECHO CANCELLATION
+extern bool echoCancellationEnabled;
+extern int echoCancellationDelay;
+extern float echoCancellationGain;
+
 // WEBSOCKET
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
 void websocketSetup(String server_domain, int port, String path);
@@ -54,3 +59,8 @@ void audioStreamTask(void *parameter);
 
 // AUDIO INPUT
 void micTask(void *parameter);
+
+// ECHO CANCELLATION
+void enableEchoCancellation(bool enable);
+void setEchoCancellationDelay(int delay_ms);
+void setEchoCancellationGain(float gain);

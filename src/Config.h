@@ -41,6 +41,7 @@ enum DeviceState
     IDLE,
     LISTENING,
     SPEAKING,
+    CONCURRENT,  // New state for simultaneous listening and speaking
     PROCESSING,
     WAITING,
     OTA,

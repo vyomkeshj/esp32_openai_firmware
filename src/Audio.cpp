@@ -35,7 +35,7 @@ public:
 
   // networkTask -> webSocket.loop() -> webSocketEvent(WStype_BIN, ...) -> opusDecoder.write() -> bufferPrint.write()
   virtual size_t write(uint8_t data) override {
-    if (webSocket.isConnected() && deviceState == SPEAKING) {
+    if (webSocket.isConnected()) {
         return _buffer.writeArray(&data, 1);
     }
     return 1; //let opusDecoder write, otherwise thread will stuck
@@ -43,7 +43,7 @@ public:
 
   // networkTask -> webSocket.loop() -> webSocketEvent(WStype_BIN, ...) -> opusDecoder.write() -> bufferPrint.write()
   virtual size_t write(const uint8_t *buffer, size_t size) override {
-    if (webSocket.isConnected() && deviceState == SPEAKING) {
+    if (webSocket.isConnected()) {
         return _buffer.writeArray(buffer, size);
     }
     return size; //let opusDecoder write, otherwise thread will stuck
@@ -82,13 +82,9 @@ unsigned long getSpeakingDuration() {
 void transitionToSpeaking() {
     vTaskDelay(50);
 
-    i2sInputFlushScheduled = true;
-    
     deviceState = SPEAKING;
     digitalWrite(I2S_SD_OUT, HIGH);
     speakingStartTime = millis();
-    
-    // webSocket.enableHeartbeat(30000, 15000, 3);
     
     Serial.println("Transitioned to speaking mode");
 }
@@ -115,7 +111,6 @@ void transitionToListening() {
 
     deviceState = LISTENING;
     digitalWrite(I2S_SD_OUT, LOW);
-    // webSocket.disableHeartbeat();
 }
 
 // audioStreamTask -> copier.copy() (conditional on webSocket.isConnected())
@@ -123,6 +118,7 @@ void audioStreamTask(void *parameter) {
     Serial.println("Starting I2S stream pipeline...");
     
     pinMode(I2S_SD_OUT, OUTPUT);
+    digitalWrite(I2S_SD_OUT, HIGH); // Always enable speaker for concurrent mode
 
     OpusSettings cfg;
     cfg.sample_rate = SAMPLE_RATE;
@@ -171,7 +167,7 @@ void audioStreamTask(void *parameter) {
             queue.flush();
         }
 
-        if (webSocket.isConnected() && deviceState == SPEAKING) {
+        if (webSocket.isConnected()) {
             if (currentPitchFactor != 1.0f) {
                 pitchCopier.copy();
             } else {
@@ -191,7 +187,7 @@ class WebsocketStream : public Print {
 public:
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(uint8_t b) override {
-        if (!webSocket.isConnected() || deviceState != LISTENING) {
+        if (!webSocket.isConnected()) {
             return 1;
         }
         
@@ -203,7 +199,7 @@ public:
     
     // micTask -> micToWsCopier.copyBytes() -> wsStream.write()
     virtual size_t write(const uint8_t *buffer, size_t size) override {
-        if (size == 0 || !webSocket.isConnected() || deviceState != LISTENING) {
+        if (size == 0 || !webSocket.isConnected()) {
             return size;
         }
         
@@ -215,10 +211,90 @@ public:
 };
 
 WebsocketStream wsStream; //guard with wsMutex
+// AUDIO INPUT
 I2SStream i2sInput; //access from micTask only
 StreamCopy micToWsCopier(wsStream, i2sInput);
 volatile bool i2sInputFlushScheduled = false;
 const int MIC_COPY_SIZE = 64;
+
+// ECHO CANCELLATION
+bool echoCancellationEnabled = true;
+int echoCancellationDelay = 50; // milliseconds
+float echoCancellationGain = 0.3f; // reduction factor
+
+// Echo cancellation buffer
+const int ECHO_BUFFER_SIZE = 2400; // 50ms at 24kHz
+int16_t echoBuffer[ECHO_BUFFER_SIZE];
+int echoBufferIndex = 0;
+
+void enableEchoCancellation(bool enable) {
+    echoCancellationEnabled = enable;
+    if (!enable) {
+        // Clear echo buffer when disabling
+        memset(echoBuffer, 0, sizeof(echoBuffer));
+    }
+}
+
+void setEchoCancellationDelay(int delay_ms) {
+    echoCancellationDelay = delay_ms;
+}
+
+void setEchoCancellationGain(float gain) {
+    echoCancellationGain = gain;
+}
+
+// Simple echo cancellation function
+void applyEchoCancellation(int16_t* input, int16_t* output, size_t samples) {
+    if (!echoCancellationEnabled) {
+        memcpy(output, input, samples * sizeof(int16_t));
+        return;
+    }
+    
+    for (size_t i = 0; i < samples; i++) {
+        // Get the delayed echo sample
+        int echoIndex = (echoBufferIndex - echoCancellationDelay * 24 + ECHO_BUFFER_SIZE) % ECHO_BUFFER_SIZE;
+        int16_t echoSample = echoBuffer[echoIndex];
+        
+        // Subtract the echo with gain reduction
+        int32_t result = input[i] - (int32_t)(echoSample * echoCancellationGain);
+        
+        // Clamp to 16-bit range
+        if (result > 32767) result = 32767;
+        if (result < -32768) result = -32768;
+        
+        output[i] = (int16_t)result;
+        
+        // Store current sample in echo buffer
+        echoBuffer[echoBufferIndex] = input[i];
+        echoBufferIndex = (echoBufferIndex + 1) % ECHO_BUFFER_SIZE;
+    }
+}
+
+// Custom echo cancellation stream
+class EchoCancellationStream : public AudioStream {
+public:
+    EchoCancellationStream(AudioStream& source) : _source(source) {}
+    
+    size_t readBytes(uint8_t* buffer, size_t length) override {
+        size_t bytesRead = _source.readBytes(buffer, length);
+        if (bytesRead > 0 && echoCancellationEnabled) {
+            // Convert bytes to samples and apply echo cancellation
+            size_t samples = bytesRead / sizeof(int16_t);
+            int16_t* samples_ptr = (int16_t*)buffer;
+            int16_t* output_ptr = (int16_t*)buffer;
+            
+            applyEchoCancellation(samples_ptr, output_ptr, samples);
+        }
+        return bytesRead;
+    }
+    
+    int available() override {
+        return _source.available();
+    }
+    
+private:
+    AudioStream& _source;
+};
 
 void micTask(void *parameter) {
     // Configure and start I2S input stream.
@@ -235,6 +311,7 @@ void micTask(void *parameter) {
     i2sConfig.port_no = I2S_PORT_IN;
     i2sInput.begin(i2sConfig);
 
+    // Use echo cancellation stream in concurrent mode
     micToWsCopier.setDelayOnNoData(0);
 
     while (1) {
@@ -243,7 +320,7 @@ void micTask(void *parameter) {
             i2sInput.flush();
         }
 
-        if (deviceState == LISTENING && webSocket.isConnected()) {
+        if (webSocket.isConnected()) {
             // Use smaller chunk size to avoid blocking too long
             micToWsCopier.copyBytes(MIC_COPY_SIZE);
             
@@ -267,7 +344,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
         break;
     case WStype_CONNECTED:
         Serial.printf("[WSc] Connected to url: %s\n", payload);
-        deviceState = PROCESSING;
+        deviceState = CONCURRENT; // Start in concurrent mode when connected
         break;
     case WStype_TEXT:
     {
@@ -306,6 +383,25 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
                 pitchShift.begin(pcfg);
             }
 
+            // Configure echo cancellation if provided
+            if (doc["echo_cancellation"].is<bool>()) {
+                bool enableEcho = doc["echo_cancellation"].as<bool>();
+                enableEchoCancellation(enableEcho);
+                Serial.printf("Echo cancellation %s\n", enableEcho ? "enabled" : "disabled");
+            }
+            
+            if (doc["echo_delay"].is<int>()) {
+                int delay_ms = doc["echo_delay"].as<int>();
+                setEchoCancellationDelay(delay_ms);
+                Serial.printf("Echo cancellation delay set to %d ms\n", delay_ms);
+            }
+            
+            if (doc["echo_gain"].is<float>()) {
+                float gain = doc["echo_gain"].as<float>();
+                setEchoCancellationGain(gain);
+                Serial.printf("Echo cancellation gain set to %.2f\n", gain);
+            }
+
             if (is_ota) {
                 Serial.println("OTA update received");
                 setOTAStatusInNVS(OTA_IN_PROGRESS);
@@ -325,16 +421,16 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
             Serial.println(msg);
 
             if (strcmp((char*)msg.c_str(), "RESPONSE.COMPLETE") == 0 || strcmp((char*)msg.c_str(), "RESPONSE.ERROR") == 0) {
-                Serial.println("Received RESPONSE.COMPLETE or RESPONSE.ERROR, starting listening again");
+                Serial.println("Received RESPONSE.COMPLETE or RESPONSE.ERROR");
 
                 // Check if volume_control is included in the message
-                if (doc.containsKey("volume_control")) {
+                if (doc["volume_control"].is<int>()) {
                     int newVolume = doc["volume_control"].as<int>();
                     volume.setVolume(newVolume / 100.0f);
                 }
 
-                scheduleListeningRestart = true;
-                scheduledTime = millis() + 1000; // 1 second delay
+                // In concurrent mode, we don't need to transition states
+                // Just continue listening and speaking
             } else if (strcmp((char*)msg.c_str(), "AUDIO.COMMITTED") == 0) {
                 deviceState = PROCESSING; 
             } else if (strcmp((char*)msg.c_str(), "RESPONSE.CREATED") == 0) {
@@ -351,20 +447,12 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
     {
         if (scheduleListeningRestart) {
             Serial.println("Skipping audio data due to button/touch interrupt.");
-            // Immediately transition to listening if button was pressed
-            if (deviceState == SPEAKING) {
-                i2sOutputFlushScheduled = true; // Flush the audio buffer
-                transitionToListening(); // Transition immediately instead of waiting
-            }
+            // In concurrent mode, we don't need to transition states
+            // Just continue processing audio
             break;
         }
         
-        if (deviceState != SPEAKING) {
-            Serial.println("Skipping audio data - not in speaking mode.");
-            break;
-        }
-
-        // Otherwise process the audio data normally
+        // Process audio data regardless of state in concurrent mode
         size_t processed = opusDecoder.write(payload, length);
         if (processed != length) {
             Serial.printf("Warning: Only processed %d/%d bytes\n", processed, length);

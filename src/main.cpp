@@ -110,11 +110,11 @@ static void onButtonSingleClickCb(void *button_handle, void *usr_data)
     Serial.println("Button single click");
     delay(10);
     
-    // If we're in SPEAKING state, interrupt and switch to listening
-    if (deviceState == SPEAKING) {
-        Serial.println("Interrupting speech and transitioning to listening");
-        scheduleListeningRestart = true;
-        scheduledTime = millis(); // Schedule immediate transition
+    // In concurrent mode, button press can be used for other purposes
+    // For now, we'll use it to toggle volume or other features
+    if (deviceState == CONCURRENT) {
+        Serial.println("Button pressed in concurrent mode - could be used for volume control or other features");
+        // TODO: Implement volume control or other features
     }
 }
 
@@ -184,7 +184,7 @@ void touchTask(void* parameter) {
 
 void setupDeviceMetadata() {
     // factoryResetDevice();
-    deviceState = IDLE;
+    deviceState = CONCURRENT; // Start in concurrent mode for real-time calls
 
     getAuthTokenFromNVS();
     getOTAStatusFromNVS();
