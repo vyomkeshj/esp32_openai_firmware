@@ -215,7 +215,10 @@ void setup()
         Button *btn = new Button(BUTTON_PIN, false);
         btn->attachLongPressUpEventCb(&onButtonLongPressUpEventCb, NULL);
         btn->attachDoubleClickEventCb(&onButtonDoubleClickCb, NULL);
-        btn->attachSingleClickEventCb(&onButtonSingleClickCb, NULL);
+        btn->detachSingleClickEvent();
+
+        // btn->attachSingleClickEventCb(&onButtonSingleClickCb, NULL);
+
     #endif
 
     // Pin audio tasks to Core 1 (application core)
