@@ -6,8 +6,9 @@ This implementation enables **concurrent listening and speaking** for real-time 
 
 - **Simultaneous audio input and output** - Microphone captures audio while speaker plays received audio
 - **Echo cancellation** - Prevents feedback loops between speaker and microphone
+- **Voice Activity Detection (VAD)** - Pauses incoming audio when user starts talking
 - **Real-time communication** - No more switching between listening and speaking states
-- **Configurable audio processing** - Adjustable echo cancellation parameters
+- **Configurable audio processing** - Adjustable echo cancellation and VAD parameters
 
 ## Key Changes
 

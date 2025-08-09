@@ -263,6 +263,17 @@ void setup()
         0                  // Core 0 (protocol core)
     );
 
+    // CPU monitor (prints per-core utilization every 5s)
+    xTaskCreatePinnedToCore(
+        cpuMonitorTask,
+        "CPU Monitor",
+        4096,
+        NULL,
+        1, // low priority
+        NULL,
+        0  // run on core 0
+    );
+
     // WIFI
     setupWiFi();
 }

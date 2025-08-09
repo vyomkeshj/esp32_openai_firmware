@@ -7,6 +7,11 @@
 #include <WebSocketsClient.h>
 #include "Audio.h"
 #include "PitchShift.h"
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+#include <esp_freertos_hooks.h>
+#include <esp_timer.h>
 
 // WEBSOCKET
 SemaphoreHandle_t wsMutex;
@@ -168,10 +173,25 @@ void audioStreamTask(void *parameter) {
         }
 
         if (webSocket.isConnected()) {
-            if (currentPitchFactor != 1.0f) {
-                pitchCopier.copy();
+            // Handle conversation flow
+            if (conversationActive) {
+                // During conversation, don't play incoming audio
+                // Just read from queue to prevent blocking
+                queue.read();
+                
+                // Check for response timeout
+                if (waitingForResponse && (millis() - conversationStartTime > responseTimeout)) {
+                    Serial.println("⏰ Response timeout - resuming normal audio");
+                    waitingForResponse = false;
+                    conversationActive = false;
+                }
             } else {
-                copier.copy();
+                // Normal mode - play incoming audio
+                if (currentPitchFactor != 1.0f) {
+                    pitchCopier.copy();
+                } else {
+                    copier.copy();
+                }
             }
         }
         else {
@@ -227,6 +247,20 @@ const int ECHO_BUFFER_SIZE = 2400; // 50ms at 24kHz
 int16_t echoBuffer[ECHO_BUFFER_SIZE];
 int echoBufferIndex = 0;
 
+// VOICE ACTIVITY DETECTION (VAD)
+bool vadEnabled = true;
+int vadThreshold = 1000; // Amplitude threshold for voice detection
+int vadSilenceDuration = 500; // ms of silence before resuming audio
+bool userIsTalking = false;
+unsigned long lastVoiceActivity = 0;
+int voiceActivityBuffer[64]; // Buffer for VAD analysis
+
+// CONVERSATION FLOW CONTROL
+bool conversationActive = false;
+bool waitingForResponse = false;
+unsigned long conversationStartTime = 0;
+unsigned long responseTimeout = 10000; // 10 second timeout for response
+
 void enableEchoCancellation(bool enable) {
     echoCancellationEnabled = enable;
     if (!enable) {
@@ -241,6 +275,86 @@ void setEchoCancellationDelay(int delay_ms) {
 
 void setEchoCancellationGain(float gain) {
     echoCancellationGain = gain;
+}
+
+// VOICE ACTIVITY DETECTION FUNCTIONS
+void enableVAD(bool enable) {
+    vadEnabled = enable;
+    if (!enable) {
+        userIsTalking = false;
+        lastVoiceActivity = 0;
+    }
+}
+
+void setVADThreshold(int threshold) {
+    vadThreshold = threshold;
+}
+
+void setVADSilenceDuration(int duration_ms) {
+    vadSilenceDuration = duration_ms;
+}
+
+bool detectVoiceActivity(int16_t* samples, size_t count) {
+    if (!vadEnabled) return false;
+    
+    // Calculate RMS (Root Mean Square) of the audio samples
+    long sum = 0;
+    for (size_t i = 0; i < count; i++) {
+        sum += (long)samples[i] * samples[i];
+    }
+    
+    int rms = sqrt(sum / count);
+    
+    // Check if RMS exceeds threshold
+    if (rms > vadThreshold) {
+        lastVoiceActivity = millis();
+        return true;
+    }
+    
+    return false;
+}
+
+void updateVADStatus() {
+    if (!vadEnabled) {
+        userIsTalking = false;
+        return;
+    }
+    
+    // Check if enough time has passed since last voice activity
+    if (millis() - lastVoiceActivity > vadSilenceDuration) {
+        userIsTalking = false;
+    } else {
+        userIsTalking = true;
+    }
+}
+
+// CONVERSATION FLOW CONTROL FUNCTIONS
+void startConversation() {
+    conversationActive = true;
+    conversationStartTime = millis();
+    waitingForResponse = false;
+    
+    // Flush speaker buffer immediately
+    i2sOutputFlushScheduled = true;
+    audioBuffer.clear();
+    
+    Serial.println("🎤 Conversation started - flushing audio buffer");
+}
+
+void endConversation() {
+    conversationActive = false;
+    waitingForResponse = false;
+    conversationStartTime = 0;
+    
+    Serial.println("🔇 Conversation ended");
+}
+
+void setResponseTimeout(int timeout_ms) {
+    responseTimeout = timeout_ms;
+}
+
+bool isWaitingForResponse() {
+    return waitingForResponse;
 }
 
 // Simple echo cancellation function
@@ -314,6 +428,13 @@ void micTask(void *parameter) {
     // Use echo cancellation stream in concurrent mode
     micToWsCopier.setDelayOnNoData(0);
 
+    // VAD buffer for analysis
+    uint8_t vadBuffer[MIC_COPY_SIZE];
+    static unsigned long lastVADCheck = 0;
+    const int VAD_CHECK_INTERVAL = 50; // Check VAD every 50ms
+    static bool wasTalking = false; // Track previous talking state
+    static unsigned long silenceStart = 0; // Track silence start time
+
     while (1) {
         if ( i2sInputFlushScheduled ) {
             i2sInputFlushScheduled = false;
@@ -321,8 +442,50 @@ void micTask(void *parameter) {
         }
 
         if (webSocket.isConnected()) {
-            // Use smaller chunk size to avoid blocking too long
-            micToWsCopier.copyBytes(MIC_COPY_SIZE);
+            // Read microphone data for VAD analysis
+            size_t bytesRead = i2sInput.readBytes(vadBuffer, MIC_COPY_SIZE);
+            
+            if (bytesRead > 0) {
+                // Check for voice activity periodically
+                if (millis() - lastVADCheck > VAD_CHECK_INTERVAL) {
+                    lastVADCheck = millis();
+                    
+                    // Convert bytes to samples for VAD
+                    int16_t* samples = (int16_t*)vadBuffer;
+                    size_t sampleCount = bytesRead / sizeof(int16_t);
+                    
+                    // Detect voice activity
+                    if (detectVoiceActivity(samples, sampleCount)) {
+                        // Voice detected - update status
+                        updateVADStatus();
+                        
+                        // Start conversation if not already active
+                        if (!conversationActive && userIsTalking) {
+                            startConversation();
+                        }
+                        
+                        // Reset silence timer when voice is detected
+                        silenceStart = 0;
+                    } else {
+                        // No voice detected - update status
+                        updateVADStatus();
+                        
+                        // End conversation if user stopped talking
+                        if (conversationActive && !userIsTalking) {
+                            // Wait a bit to see if user continues talking
+                            if (silenceStart == 0) {
+                                silenceStart = millis();
+                            } else if (millis() - silenceStart > 1000) { // 1 second of silence
+                                endConversation();
+                                silenceStart = 0;
+                            }
+                        }
+                    }
+                }
+                
+                // Always send audio to websocket when connected
+                micToWsCopier.copyBytes(MIC_COPY_SIZE);
+            }
             
             // Yield more frequently
             vTaskDelay(1);
@@ -402,6 +565,32 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
                 Serial.printf("Echo cancellation gain set to %.2f\n", gain);
             }
 
+            // Configure VAD if provided
+            if (doc["vad_enabled"].is<bool>()) {
+                bool vadEnabled = doc["vad_enabled"].as<bool>();
+                enableVAD(vadEnabled);
+                Serial.printf("Voice Activity Detection %s\n", vadEnabled ? "enabled" : "disabled");
+            }
+            
+            if (doc["vad_threshold"].is<int>()) {
+                int threshold = doc["vad_threshold"].as<int>();
+                setVADThreshold(threshold);
+                Serial.printf("VAD threshold set to %d\n", threshold);
+            }
+            
+            if (doc["vad_silence_duration"].is<int>()) {
+                int duration = doc["vad_silence_duration"].as<int>();
+                setVADSilenceDuration(duration);
+                Serial.printf("VAD silence duration set to %d ms\n", duration);
+            }
+
+            // Configure conversation flow if provided
+            if (doc["response_timeout"].is<int>()) {
+                int timeout = doc["response_timeout"].as<int>();
+                setResponseTimeout(timeout);
+                Serial.printf("Response timeout set to %d ms\n", timeout);
+            }
+
             if (is_ota) {
                 Serial.println("OTA update received");
                 setOTAStatusInNVS(OTA_IN_PROGRESS);
@@ -429,12 +618,21 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
                     volume.setVolume(newVolume / 100.0f);
                 }
 
-                // In concurrent mode, we don't need to transition states
-                // Just continue listening and speaking
+                // End conversation and resume normal audio
+                if (conversationActive) {
+                    endConversation();
+                }
             } else if (strcmp((char*)msg.c_str(), "AUDIO.COMMITTED") == 0) {
                 deviceState = PROCESSING; 
             } else if (strcmp((char*)msg.c_str(), "RESPONSE.CREATED") == 0) {
                 Serial.println("Received RESPONSE.CREATED, transitioning to speaking");
+                
+                // If in conversation mode, start waiting for response
+                if (conversationActive) {
+                    waitingForResponse = true;
+                    Serial.println("🎧 Waiting for response from server...");
+                }
+                
                 transitionToSpeaking();
             } else if (strcmp((char*)msg.c_str(), "SESSION.END") == 0) {
                 Serial.println("Received SESSION.END, going to sleep");
@@ -509,5 +707,66 @@ void networkTask(void *parameter) {
         xSemaphoreGive(wsMutex);
 
         vTaskDelay(1);
+    }
+}
+
+// Helper: find idle task names for both cores
+// Idle-hook based CPU monitor (no FreeRTOS runtime stats needed)
+static volatile uint64_t idleCountCore0 = 0;
+static volatile uint64_t idleCountCore1 = 0;
+
+extern "C" bool idleHookCore0() {
+    idleCountCore0++;
+    return true;
+}
+
+extern "C" bool idleHookCore1() {
+    idleCountCore1++;
+    return true;
+}
+
+void cpuMonitorTask(void *parameter) {
+    static bool hooksRegistered = false;
+    if (!hooksRegistered) {
+        if (!esp_register_freertos_idle_hook_for_cpu(idleHookCore0, 0)) {
+            Serial.println("CPU Monitor: registered idle hook for core 0");
+        } else {
+            Serial.println("CPU Monitor: failed to register idle hook for core 0");
+        }
+        if (!esp_register_freertos_idle_hook_for_cpu(idleHookCore1, 1)) {
+            Serial.println("CPU Monitor: registered idle hook for core 1");
+        } else {
+            Serial.println("CPU Monitor: failed to register idle hook for core 1");
+        }
+        hooksRegistered = true;
+    }
+
+    Serial.println("CPU Monitor (idle-hook) started (5s interval)");
+
+    uint64_t lastIdle0 = idleCountCore0;
+    uint64_t lastIdle1 = idleCountCore1;
+    uint64_t maxIdleDelta0 = 0;
+    uint64_t maxIdleDelta1 = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        uint64_t nowIdle0 = idleCountCore0;
+        uint64_t nowIdle1 = idleCountCore1;
+        uint64_t d0 = (nowIdle0 - lastIdle0);
+        uint64_t d1 = (nowIdle1 - lastIdle1);
+        lastIdle0 = nowIdle0;
+        lastIdle1 = nowIdle1;
+
+        if (d0 > maxIdleDelta0) maxIdleDelta0 = d0;
+        if (d1 > maxIdleDelta1) maxIdleDelta1 = d1;
+
+        float util0 = (maxIdleDelta0 > 0) ? (100.0f * (1.0f - ((float)d0 / (float)maxIdleDelta0))) : 0.0f;
+        float util1 = (maxIdleDelta1 > 0) ? (100.0f * (1.0f - ((float)d1 / (float)maxIdleDelta1))) : 0.0f;
+
+        if (util0 < 0) util0 = 0; if (util0 > 100) util0 = 100;
+        if (util1 < 0) util1 = 0; if (util1 > 100) util1 = 100;
+
+        Serial.printf("Core0 Util: %.1f%% | Core1 Util: %.1f%%\n", util0, util1);
     }
 }

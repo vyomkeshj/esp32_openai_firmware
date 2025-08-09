@@ -48,10 +48,27 @@ extern bool echoCancellationEnabled;
 extern int echoCancellationDelay;
 extern float echoCancellationGain;
 
+// VOICE ACTIVITY DETECTION (VAD)
+extern bool vadEnabled;
+extern int vadThreshold;
+extern int vadSilenceDuration;
+extern bool userIsTalking;
+extern unsigned long lastVoiceActivity;
+extern int voiceActivityBuffer[64]; // Buffer for VAD analysis
+
+// CONVERSATION FLOW CONTROL
+extern bool conversationActive;
+extern bool waitingForResponse;
+extern unsigned long conversationStartTime;
+extern unsigned long responseTimeout;
+
 // WEBSOCKET
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
 void websocketSetup(String server_domain, int port, String path);
 void networkTask(void *parameter);
+
+// CPU MONITOR
+void cpuMonitorTask(void *parameter);
 
 // AUDIO OUTPUT
 unsigned long getSpeakingDuration();
@@ -64,3 +81,16 @@ void micTask(void *parameter);
 void enableEchoCancellation(bool enable);
 void setEchoCancellationDelay(int delay_ms);
 void setEchoCancellationGain(float gain);
+
+// VOICE ACTIVITY DETECTION
+void enableVAD(bool enable);
+void setVADThreshold(int threshold);
+void setVADSilenceDuration(int duration_ms);
+bool detectVoiceActivity(int16_t* samples, size_t count);
+void updateVADStatus();
+
+// CONVERSATION FLOW CONTROL
+void startConversation();
+void endConversation();
+void setResponseTimeout(int timeout_ms);
+bool isWaitingForResponse();
