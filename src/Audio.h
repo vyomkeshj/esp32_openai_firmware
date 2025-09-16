@@ -5,6 +5,7 @@
 // #include "AudioTools/Concurrency/RTOS.h"
 #include "AudioTools/AudioCodecs/CodecOpus.h"
 #include <WebSocketsClient.h>
+#include <ESP32-SpeexDSP.h>
 
 extern SemaphoreHandle_t wsMutex;
 extern WebSocketsClient webSocket;
@@ -12,6 +13,7 @@ extern WebSocketsClient webSocket;
 extern TaskHandle_t speakerTaskHandle;
 extern TaskHandle_t micTaskHandle;
 extern TaskHandle_t networkTaskHandle;
+extern TaskHandle_t vadTaskHandle;
 
 extern volatile bool scheduleListeningRestart;
 extern unsigned long scheduledTime;
@@ -50,11 +52,7 @@ extern float echoCancellationGain;
 
 // VOICE ACTIVITY DETECTION (VAD)
 extern bool vadEnabled;
-extern int vadThreshold;
-extern int vadSilenceDuration;
-extern bool userIsTalking;
-extern unsigned long lastVoiceActivity;
-extern int voiceActivityBuffer[64]; // Buffer for VAD analysis
+extern ESP32SpeexDSP dsp;
 
 // CONVERSATION FLOW CONTROL
 extern bool conversationActive;
@@ -74,17 +72,16 @@ void audioStreamTask(void *parameter);
 // AUDIO INPUT
 void micTask(void *parameter);
 
+// VAD TASK
+void vadTask(void *parameter);
+
 // ECHO CANCELLATION
 void enableEchoCancellation(bool enable);
 void setEchoCancellationDelay(int delay_ms);
 void setEchoCancellationGain(float gain);
 
 // VOICE ACTIVITY DETECTION
-void enableVAD(bool enable);
-void setVADThreshold(int threshold);
-void setVADSilenceDuration(int duration_ms);
-bool detectVoiceActivity(int16_t* samples, size_t count);
-void updateVADStatus();
+// VAD is now handled by ESP32-SpeexDSP library
 
 // CONVERSATION FLOW CONTROL
 void startConversation();

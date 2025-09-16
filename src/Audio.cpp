@@ -21,6 +21,8 @@
 #include "AudioTools/AudioCodecs/CodecOpus.h"
 #include "Audio.h"
 #include "PitchShift.h"
+#include <ESP32-SpeexDSP.h>
+#include <math.h>
 
 // Some SDKs name the I2S "standard/Philips" format differently.
 #ifndef I2S_STD_FORMAT
@@ -39,6 +41,7 @@ WebSocketsClient webSocket;
 TaskHandle_t speakerTaskHandle = NULL;
 TaskHandle_t micTaskHandle     = NULL;
 TaskHandle_t networkTaskHandle = NULL;
+TaskHandle_t vadTaskHandle     = NULL;
 
 // ---------------- TIMING REGISTERS ----------------
 volatile bool     scheduleListeningRestart = false;
@@ -57,6 +60,10 @@ int   currentVolume      = 70;
 float currentPitchFactor = 1.0f;
 const int CHANNELS       = 1;  // Mono
 const int BITS_PER_SAMPLE= 16; // 16-bit audio (expected by server)
+
+// ---------------- VAD (Voice Activity Detection) ----------------
+ESP32SpeexDSP dsp;
+bool vadEnabled = false;
 
 // ---------------- AUDIO OUTPUT ----------------
 BufferRTOS<uint8_t> audioBuffer(AUDIO_BUFFER_SIZE, AUDIO_CHUNK_SIZE); // SPSC
@@ -272,6 +279,7 @@ public:
 
   size_t write(const uint8_t *buffer, size_t size) override {
     if (size == 0 || !canSend()) return size;
+    
     // Briefly wait for the mutex to avoid starvation during playback
     if (xSemaphoreTake(wsMutex, 2 / portTICK_PERIOD_MS) != pdTRUE) return size;
     webSocket.sendBIN(buffer, size);
@@ -321,6 +329,94 @@ void micTask(void *parameter) {
       vTaskDelay(1);
     } else {
       vTaskDelay(10);
+    }
+  }
+}
+
+// ---------------- VAD TASK ----------------
+void vadTask(void *parameter) {
+  Serial.println("Starting VAD task...");
+  
+  // Initialize SpeexDSP preprocessing for VAD
+  if (!dsp.beginMicPreprocess(MIC_COPY_SIZE / 2, SAMPLE_RATE)) {
+    Serial.println("VAD preprocessing initialization failed!");
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  dsp.enableMicVAD(true);
+  dsp.setMicVADThreshold(50); // More sensitive
+  dsp.enableMicNoiseSuppression(true);
+  dsp.setMicNoiseSuppressionLevel(-20); // Less aggressive noise suppression
+  Serial.println("VAD preprocessing initialized with threshold 20 and light noise suppression");
+  
+  // Create separate I2S stream for VAD
+  I2SStream vadI2S;
+  auto i2sConfig = vadI2S.defaultConfig(RX_MODE);
+  i2sConfig.bits_per_sample  = BITS_PER_SAMPLE;   // 16-bit PCM
+  i2sConfig.sample_rate      = SAMPLE_RATE;       // 16000 Hz
+  i2sConfig.channels         = CHANNELS;          // Mono
+  i2sConfig.i2s_format       = I2S_STD_FORMAT;
+  i2sConfig.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT;
+  i2sConfig.pin_bck          = I2S_SCK;
+  i2sConfig.pin_ws           = I2S_WS;
+  i2sConfig.pin_data         = I2S_SD;
+  i2sConfig.port_no          = I2S_PORT_IN;
+  
+  if (!vadI2S.begin(i2sConfig)) {
+    Serial.println("VAD I2S initialization failed!");
+    vTaskDelete(NULL);
+    return;
+  }
+  Serial.println("VAD I2S initialized successfully");
+  
+  // Buffer for VAD processing
+  int16_t audioSamples[MIC_COPY_SIZE / 2];
+  
+  while (1) {
+    if (vadEnabled) {
+      // Read audio data directly from I2S
+      size_t bytesRead = vadI2S.readBytes((uint8_t*)audioSamples, MIC_COPY_SIZE);
+      
+      if (bytesRead > 0) {
+        // Calculate RMS first to see signal level
+        long sum = 0;
+        int sampleCount = bytesRead / 2; // Convert bytes to 16-bit samples
+        for (int i = 0; i < sampleCount; i++) {
+          sum += (long)audioSamples[i] * audioSamples[i];
+        }
+        float rms = sqrt((float)sum / sampleCount);
+        
+        // Only process if we have enough samples (at least 160 samples = 10ms at 16kHz)
+        if (sampleCount >= 160) {
+          // Process audio through SpeexDSP preprocessing (includes VAD)
+          dsp.preprocessMicAudio(audioSamples);
+          
+          // Check for voice activity using SpeexDSP VAD
+          if (dsp.isMicVoiceDetected()) {
+            // Only trigger if signal is strong enough (RMS > 500) and enough time has passed
+            static unsigned long lastVADTime = 0;
+            unsigned long now = millis();
+            if (rms > 500.0f && now - lastVADTime > 1000) { // Lower RMS threshold, 1 second debounce
+              lastVADTime = now;
+              Serial.println("Voice detected! Clearing speaker buffer");
+              
+              // Clear the speaker buffer to stop current audio
+              audioBuffer.clear();
+              i2sOutputFlushScheduled = true;
+              
+              // Send interrupt instruction to server
+              sendInterruptInstruction(getSpeakingDuration());
+            }
+          }
+        }
+      } else {
+        // No data available, wait a bit
+        vTaskDelay(1);
+      }
+    } else {
+      // VAD disabled, wait longer
+      vTaskDelay(100);
     }
   }
 }

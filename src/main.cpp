@@ -206,6 +206,9 @@ void setup()
     // SETUP
     setupDeviceMetadata();
     wsMutex = xSemaphoreCreateMutex();    
+    // Initialize VAD (Voice Activity Detection)
+    vadEnabled = true;
+    Serial.println("VAD will be initialized in micTask");
 
     // INTERRUPT
     #ifdef TOUCH_MODE
@@ -263,6 +266,21 @@ void setup()
         &networkTaskHandle,// Handle
         0                  // Core 0 (protocol core)
     );
+
+    // Create VAD task
+    xTaskCreatePinnedToCore(
+        vadTask,           // Function
+        "VAD Task",        // Name
+        4096,              // Stack size
+        NULL,              // Parameters
+        2,                 // Priority
+        &vadTaskHandle,    // Handle
+        1                  // Core 1 (application core)
+    );
+
+    // Initialize VAD (Voice Activity Detection)
+    vadEnabled = true;
+    Serial.println("VAD task created and enabled");
 
     // WIFI
     setupWiFi();
