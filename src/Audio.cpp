@@ -634,6 +634,17 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
                 }
                 
                 transitionToSpeaking();
+            } else if (strcmp((char*)msg.c_str(), "CLEAR_BUFFER") == 0) {
+                Serial.println("Received CLEAR_BUFFER, clearing audio buffer and stopping playback");
+                // Clear the audio buffer to stop any pending audio
+                audioBuffer.clear();
+                // Flush the I2S output to immediately stop speaker audio
+                i2sOutputFlushScheduled = true;
+                // Also flush volume streams immediately for instant audio stop
+                i2s.flush();
+                volume.flush();
+                queue.flush();
+                
             } else if (strcmp((char*)msg.c_str(), "SESSION.END") == 0) {
                 Serial.println("Received SESSION.END, going to sleep");
                 sleepRequested = true;
