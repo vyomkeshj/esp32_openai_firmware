@@ -396,17 +396,32 @@ void vadTask(void *parameter) {
           if (dsp.isMicVoiceDetected()) {
             // Only trigger if signal is strong enough (RMS > 500) and enough time has passed
             static unsigned long lastVADTime = 0;
+            static unsigned long voiceDetectedTime = 0;
             unsigned long now = millis();
+            
             if (rms > 500.0f && now - lastVADTime > 1000) { // Lower RMS threshold, 1 second debounce
               lastVADTime = now;
-              Serial.println("Voice detected! Clearing speaker buffer");
+              voiceDetectedTime = now;
+              Serial.println("Voice detected! Stopping playback");
+              
+              // Temporarily disable playback
+              playbackActive = false;
               
               // Clear the speaker buffer to stop current audio
               audioBuffer.clear();
               i2sOutputFlushScheduled = true;
               
-              // Send interrupt instruction to server
-              sendInterruptInstruction(getSpeakingDuration());
+              // Also flush volume streams and queue for immediate stop
+              volume.flush();
+              volumePitch.flush();
+              queue.flush();
+            }
+            
+            // Re-enable playback after 2 seconds of silence
+            if (voiceDetectedTime > 0 && now - voiceDetectedTime > 2000) {
+              playbackActive = true;
+              voiceDetectedTime = 0;
+              Serial.println("Re-enabling playback");
             }
           }
         }
