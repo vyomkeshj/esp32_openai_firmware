@@ -23,7 +23,6 @@
 #else
   #include <WebServer.h>
 #endif
-#include <Audio.h>
 
 void wifiTask(void* param);
 

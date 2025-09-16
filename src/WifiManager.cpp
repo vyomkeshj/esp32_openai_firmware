@@ -6,6 +6,7 @@
  * (Attribution-NonCommercial-ShareAlike 4.0 International)
 **/
 #include "WifiManager.h"
+#include "Audio.h"
 #include "OTA.h"
 #include "AsyncJson.h"
 #include "ArduinoJson.h"

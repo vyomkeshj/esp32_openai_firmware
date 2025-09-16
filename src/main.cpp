@@ -5,6 +5,7 @@
 #include "Config.h"
 #include "SPIFFS.h"
 #include "WifiManager.h"
+#include "Audio.h"
 #include <driver/touch_sensor.h>
 #include "Button.h"
 #include "FactoryReset.h"
@@ -261,17 +262,6 @@ void setup()
         configMAX_PRIORITIES-1, // Highest priority
         &networkTaskHandle,// Handle
         0                  // Core 0 (protocol core)
-    );
-
-    // CPU monitor (prints per-core utilization every 5s)
-    xTaskCreatePinnedToCore(
-        cpuMonitorTask,
-        "CPU Monitor",
-        4096,
-        NULL,
-        1, // low priority
-        NULL,
-        0  // run on core 0
     );
 
     // WIFI

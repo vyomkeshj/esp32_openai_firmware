@@ -13,7 +13,7 @@
 // Pick one of the following (DEV_MODE, PROD_MODE, Bubbi_MODE) , comment the rest
 // For Bubbi_MODE, you will need to register your DIY Hardware on the Bubbi website
 
-#define Bubbi_MODE
+#define DEV_MODE
 // #define PROD_MODE
 // #define Bubbi_MODE
 

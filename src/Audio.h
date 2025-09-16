@@ -67,9 +67,6 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length);
 void websocketSetup(String server_domain, int port, String path);
 void networkTask(void *parameter);
 
-// CPU MONITOR
-void cpuMonitorTask(void *parameter);
-
 // AUDIO OUTPUT
 unsigned long getSpeakingDuration();
 void audioStreamTask(void *parameter);

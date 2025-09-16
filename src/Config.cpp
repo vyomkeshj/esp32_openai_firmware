@@ -33,11 +33,11 @@ volatile bool sleepRequested = false;
  */
 
 #ifdef DEV_MODE
-const char *ws_server = "192.168.162.108";
+const char *ws_server = "192.168.208.108";
 const uint16_t ws_port = 8000;
 const char *ws_path = "/";
 // Backend server details 
-const char *backend_server = "192.168.162.108";
+const char *backend_server = "192.168.208.108";
 const uint16_t backend_port = 3000;
 
 #elif defined(PROD_MODE)
@@ -73,26 +73,26 @@ const int BLUE_LED_PIN = 13;
 const int RED_LED_PIN = 9;
 const int GREEN_LED_PIN = 8;
 
-const int I2S_SD = 14;
-const int I2S_WS = 4;
-const int I2S_SCK = 1;
+// const int I2S_SD = 14;
+// const int I2S_WS = 4;
+// const int I2S_SCK = 1;
 
-const int I2S_WS_OUT = 5;
-const int I2S_BCK_OUT = 6;
-const int I2S_DATA_OUT = 7;
-const int I2S_SD_OUT = 10;
+// const int I2S_WS_OUT = 5;
+// const int I2S_BCK_OUT = 6;
+// const int I2S_DATA_OUT = 7;
+// const int I2S_SD_OUT = 10;
 
 
 // For personal device
-// const int I2S_SD = GPIO_NUM_12;
-// const int I2S_WS = GPIO_NUM_4;
-// const int I2S_SCK = GPIO_NUM_1;
+const int I2S_SD = GPIO_NUM_12;
+const int I2S_WS = GPIO_NUM_4;
+const int I2S_SCK = GPIO_NUM_1;
 
-// const int I2S_BCK_OUT = GPIO_NUM_8;
-// const int I2S_DATA_OUT = GPIO_NUM_9;
-// const int I2S_WS_OUT = GPIO_NUM_10;
+const int I2S_BCK_OUT = GPIO_NUM_8;
+const int I2S_DATA_OUT = GPIO_NUM_9;
+const int I2S_WS_OUT = GPIO_NUM_10;
 
-// const int I2S_SD_OUT = GPIO_NUM_17;
+const int I2S_SD_OUT = GPIO_NUM_17;
 
 
 const gpio_num_t BUTTON_PIN = GPIO_NUM_2; // Only RTC IO are allowed - ESP32 Pin example
