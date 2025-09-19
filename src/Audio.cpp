@@ -265,8 +265,8 @@ void audioStreamTask(void *parameter) {
 
 // ---------------- MIC → WS PIPELINE ----------------
 // Stereo capture for 2x INMP441 on one I2S bus (Left=near, Right=ref)
-// 20 ms @ 16 kHz => 320 samples per channel; stereo bytes = 320 * 2ch * 2B = 1280
-const int MIC_COPY_SAMPLES = 320;           // per-channel samples for 20 ms @ 16 kHz
+// 20 ms @ 24 kHz => 480 samples per channel; stereo bytes = 480 * 2ch * 2B = 1920
+const int MIC_COPY_SAMPLES = 480;           // per-channel samples for 20 ms @ 24 kHz
 const int MIC_STEREO_BYTES = MIC_COPY_SAMPLES * 2 /*ch*/ * sizeof(int16_t);
 
 class WebsocketStream : public Print {
@@ -305,7 +305,7 @@ I2SStream i2sInput; // mic I2S
 // StreamCopy micToWsCopier(wsStream, i2sInput);
 
 void micTask(void *parameter) {
-  // --- Configure I2S RX as STEREO: Left(near), Right(reference) ---
+  // --- Configure I2S RX as STEREO: Right(near), Left(reference) ---
   auto i2sConfig = i2sInput.defaultConfig(RX_MODE);
   i2sConfig.bits_per_sample  = BITS_PER_SAMPLE;     // 16-bit PCM expected by server
   i2sConfig.sample_rate      = SAMPLE_RATE;         // e.g. 16000
@@ -331,6 +331,7 @@ void micTask(void *parameter) {
                   echoCancellationEnabled, echoCancellationDelay, echoCancellationGain);
     if (!dsp.beginAEC(aecFrame, aecFilterLen, SAMPLE_RATE)) {
       Serial.println("AEC initialization failed! Continuing without AEC.");
+      aecInitialized = false;
     } else {
       aecInitialized = true;
       Serial.printf("AEC initialized: frame=%d, tail=%d, fs=%d\n", aecFrame, aecFilterLen, SAMPLE_RATE);
@@ -406,32 +407,39 @@ void micTask(void *parameter) {
       continue;
     }
 
-    // --- Deinterleave: Left = near mic, Right = reference mic ---
-    // NOTE: If channels appear swapped on your hardware, swap assignments below.
+    // --- Deinterleave: Right = near mic, Left = reference mic ---
+    // NOTE: Hardware has Right=voice, Left=reference (opposite of expected)
     for (int i = 0, j = 0; i < MIC_COPY_SAMPLES; ++i, j += 2) {
-      int16_t l = interleaved[j + 0]; // Left slot (near mic)
-      int16_t r = interleaved[j + 1]; // Right slot (reference mic)
-      micNear[i] = l;
-      refRaw[i]  = r;
+      int16_t l = interleaved[j + 0]; // Left slot (reference mic)
+      int16_t r = interleaved[j + 1]; // Right slot (near mic - voice)
+      micNear[i] = r;  // Right channel is the near microphone
+      refRaw[i]  = l;  // Left channel is the reference microphone
     }
     
-    // Debug: Print channel levels occasionally (every 200 frames = 4 seconds)
+    // Debug: Print channel levels and AEC status occasionally (every 100 frames = 2 seconds)
     static int debugCounter = 0;
-    if (++debugCounter >= 200) {
+    if (++debugCounter >= 100) {
       debugCounter = 0;
-      long leftSum = 0, rightSum = 0;
+      long nearSum = 0, refSum = 0;
       for (int i = 0; i < MIC_COPY_SAMPLES; i++) {
-        leftSum += abs(micNear[i]);
-        rightSum += abs(refRaw[i]);
+        nearSum += abs(micNear[i]);  // Right channel (voice)
+        refSum += abs(refRaw[i]);    // Left channel (reference)
       }
-      Serial.printf("Channels - Left(near): %ld, Right(ref): %ld\n", leftSum, rightSum);
+      Serial.printf("Channels - Right(near): %ld, Left(ref): %ld, AEC: %s\n", 
+                    nearSum, refSum, 
+                    (echoCancellationEnabled && aecInitialized) ? "ON" : "OFF");
     }
 
     // --- Reference alignment & gain ---
-    applyRefDelay(refRaw, MIC_COPY_SAMPLES, refDelayed);
+    // Temporarily bypass delay processing to test
+    memcpy(refDelayed, refRaw, MIC_COPY_SAMPLES * sizeof(int16_t));
+    // applyRefDelay(refRaw, MIC_COPY_SAMPLES, refDelayed);
 
     // --- AEC (if enabled and initialized), else pass-through near ---
-    if (echoCancellationEnabled && aecInitialized) {
+    // Temporarily disable AEC to test if it's causing choppy audio
+    bool useAEC = false; // Set to true to enable AEC: echoCancellationEnabled && aecInitialized;
+    
+    if (useAEC) {
       dsp.processAEC(micNear, refDelayed, aecOut);
       // Debug: Show AEC is active occasionally (every 5 seconds)
       static int aecDebugCounter = 0;
@@ -464,7 +472,7 @@ void micTask(void *parameter) {
         wsStream.write((uint8_t*)aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
       }
     }
-    vTaskDelay(2); // Give other tasks more CPU time
+    vTaskDelay(1); // Reduced delay to prevent choppy audio
   }
 }
 
