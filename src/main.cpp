@@ -241,7 +241,7 @@ void setup()
         "Speaker Task",    // Name
         4096,              // Stack size
         NULL,              // Parameters
-        3,                 // Priority
+        5,                 // Priority (higher than mic task)
         NULL,              // Handle
         1                  // Core 1 (application core)
     );
@@ -249,9 +249,9 @@ void setup()
     xTaskCreatePinnedToCore(
         micTask,           // Function
         "Microphone Task", // Name
-        4096,              // Stack size
+        8192,              // Stack size (increased for AEC processing)
         NULL,              // Parameters
-        4,                 // Priority
+        3,                 // Priority (lower than audio playback)
         NULL,              // Handle
         1                  // Core 1 (application core)
     );
@@ -268,15 +268,15 @@ void setup()
     );
 
     // Create VAD task
-    xTaskCreatePinnedToCore(
-        vadTask,           // Function
-        "VAD Task",        // Name
-        4096,              // Stack size
-        NULL,              // Parameters
-        2,                 // Priority
-        &vadTaskHandle,    // Handle
-        1                  // Core 1 (application core)
-    );
+    // xTaskCreatePinnedToCore(
+    //     vadTask,           // Function
+    //     "VAD Task",        // Name
+    //     4096,              // Stack size
+    //     NULL,              // Parameters
+    //     2,                 // Priority
+    //     &vadTaskHandle,    // Handle
+    //     1                  // Core 1 (application core)
+    // );
 
     // Initialize VAD (Voice Activity Detection)
     vadEnabled = true;

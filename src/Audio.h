@@ -32,10 +32,6 @@ extern VolumeStream volume;
 extern QueueStream<uint8_t> queue;
 extern StreamCopy copier;
 
-// NEW for pitch shift
-extern VolumeStream volumePitch;
-extern StreamCopy pitchCopier;
-
 extern AudioInfo info;
 extern volatile bool i2sOutputFlushScheduled;
 

@@ -7,6 +7,11 @@ OtaStatus otaState = OTA_IDLE;
 bool factory_reset_status = false;
 volatile bool sleepRequested = false;
 
+// Echo cancellation variables
+bool echoCancellationEnabled = true;  // Enable AEC by default
+int echoCancellationDelay = 50;       // 50ms delay (adjust based on your setup)
+float echoCancellationGain = 1.0f;
+
 /**
  * Configuration for Bubbi Firmware
  * 
@@ -84,9 +89,9 @@ const int GREEN_LED_PIN = 8;
 
 
 // For personal device
-const int I2S_SD = GPIO_NUM_12;
-const int I2S_WS = GPIO_NUM_4;
-const int I2S_SCK = GPIO_NUM_1;
+const int I2S_SD = GPIO_NUM_12; // mic A5
+const int I2S_WS = GPIO_NUM_4; // A3
+const int I2S_SCK = GPIO_NUM_1; // A0
 
 const int I2S_BCK_OUT = GPIO_NUM_8;
 const int I2S_DATA_OUT = GPIO_NUM_9;

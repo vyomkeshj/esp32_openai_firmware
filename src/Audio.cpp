@@ -264,7 +264,10 @@ void audioStreamTask(void *parameter) {
 }
 
 // ---------------- MIC → WS PIPELINE ----------------
-const int MIC_COPY_SIZE = 640; // 20ms @ 16kHz mono 16-bit
+// Stereo capture for 2x INMP441 on one I2S bus (Left=near, Right=ref)
+// 20 ms @ 16 kHz => 320 samples per channel; stereo bytes = 320 * 2ch * 2B = 1280
+const int MIC_COPY_SAMPLES = 320;           // per-channel samples for 20 ms @ 16 kHz
+const int MIC_STEREO_BYTES = MIC_COPY_SAMPLES * 2 /*ch*/ * sizeof(int16_t);
 
 class WebsocketStream : public Print {
 public:
@@ -298,16 +301,18 @@ private:
 
 WebsocketStream wsStream;
 I2SStream i2sInput; // mic I2S
-StreamCopy micToWsCopier(wsStream, i2sInput);
+// StreamCopy no longer used; we do AEC then push to wsStream directly
+// StreamCopy micToWsCopier(wsStream, i2sInput);
 
 void micTask(void *parameter) {
+  // --- Configure I2S RX as STEREO: Left(near), Right(reference) ---
   auto i2sConfig = i2sInput.defaultConfig(RX_MODE);
-  i2sConfig.bits_per_sample  = BITS_PER_SAMPLE;   // 16-bit PCM expected by server
-  i2sConfig.sample_rate      = SAMPLE_RATE;       // e.g. 16000
-  i2sConfig.channels         = CHANNELS;
-  // CRITICAL: most I2S mics use standard/Philips format
-  i2sConfig.i2s_format       = I2S_STD_FORMAT;
-  i2sConfig.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT;
+  i2sConfig.bits_per_sample  = BITS_PER_SAMPLE;     // 16-bit PCM expected by server
+  i2sConfig.sample_rate      = SAMPLE_RATE;         // e.g. 16000
+  i2sConfig.channels         = 2;                   // STEREO capture
+  i2sConfig.i2s_format       = I2S_STD_FORMAT;      // Philips
+  i2sConfig.channel_format   = I2S_CHANNEL_FMT_RIGHT_LEFT; // Stereo: separated left and right channels
+  // NOTE: This gives us Left, Right interleaved data for stereo capture
 
   i2sConfig.pin_bck  = I2S_SCK;
   i2sConfig.pin_ws   = I2S_WS;
@@ -315,7 +320,73 @@ void micTask(void *parameter) {
   i2sConfig.port_no  = I2S_PORT_IN;
 
   i2sInput.begin(i2sConfig);
-  micToWsCopier.setDelayOnNoData(0);
+  Serial.println("I2S configured for stereo capture (Left=near, Right=reference)");
+
+  // --- AEC init (SpeexDSP) ---
+  static bool aecInitialized = false;
+  const int aecFrame = MIC_COPY_SAMPLES;            // 20 ms frames
+  const int aecFilterLen = 1024;                    // tail (~64 ms @ 16 kHz); adjust if needed
+  if (!aecInitialized) {
+    Serial.printf("Initializing AEC: enabled=%d, delay=%dms, gain=%.2f\n", 
+                  echoCancellationEnabled, echoCancellationDelay, echoCancellationGain);
+    if (!dsp.beginAEC(aecFrame, aecFilterLen, SAMPLE_RATE)) {
+      Serial.println("AEC initialization failed! Continuing without AEC.");
+    } else {
+      aecInitialized = true;
+      Serial.printf("AEC initialized: frame=%d, tail=%d, fs=%d\n", aecFrame, aecFilterLen, SAMPLE_RATE);
+    }
+  }
+
+  // Optional preprocessing on mic path (denoise/AGC/VAD) AFTER AEC
+  // Temporarily disabled to reduce CPU load and prevent audio playback issues
+  static bool preInitialized = false;
+  // if (!preInitialized) {
+  //   if (dsp.beginMicPreprocess(aecFrame, SAMPLE_RATE)) {
+  //     dsp.enableMicNoiseSuppression(true);
+  //     dsp.setMicNoiseSuppressionLevel(-15);
+  //     // dsp.enableAGC(true, 0.9f);
+  //     // VAD here is optional for gating TX; we keep mic always on.
+  //     preInitialized = true;
+  //     Serial.println("Preprocess initialized (NS -15dB, AGC 0.9)");
+  //   }
+  // }
+
+  // --- Reference delay line (to match acoustic path), uses echoCancellationDelay (ms) ---
+  const int maxDelayMs = 200; // safety cap
+  const int maxDelaySamples = (SAMPLE_RATE * maxDelayMs) / 1000;
+  static int16_t refDelayBuf[2048];                 // >= maxDelaySamples, power-of-two is fine
+  static size_t  refDelayHead = 0;
+  const size_t   refDelayCap  = sizeof(refDelayBuf) / sizeof(refDelayBuf[0]);
+  auto applyRefDelay = [&](const int16_t* in, int count, int16_t* out) {
+    // write current ref to ring; read delayed copy
+    int wantDelay = echoCancellationDelay;          // milliseconds, provided externally
+    if (wantDelay < 0) wantDelay = 0;
+    if (wantDelay > maxDelayMs) wantDelay = maxDelayMs;
+    const int dSamp = (SAMPLE_RATE * wantDelay) / 1000;
+    for (int i = 0; i < count; ++i) {
+      // push current sample
+      refDelayBuf[refDelayHead] = in[i];
+      // read delayed sample
+      size_t rd = (refDelayHead + refDelayCap - (size_t)dSamp) % refDelayCap;
+      int32_t s = refDelayBuf[rd];
+      // optional reference gain trim
+      if (echoCancellationGain > 0.0f && echoCancellationGain != 1.0f) {
+        s = (int32_t)((float)s * echoCancellationGain);
+        if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
+      }
+      out[i] = (int16_t)s;
+      // advance head
+      refDelayHead = (refDelayHead + 1) % refDelayCap;
+    }
+  };
+
+  // --- Buffers ---
+  static int16_t interleaved[2 * MIC_COPY_SAMPLES]; // [L,R,L,R,...] after read (we'll map correctly)
+  static int16_t micNear[MIC_COPY_SAMPLES];
+  static int16_t refRaw[MIC_COPY_SAMPLES];
+  static int16_t refDelayed[MIC_COPY_SAMPLES];
+  static int16_t aecOut[MIC_COPY_SAMPLES];
+  static int16_t postProc[MIC_COPY_SAMPLES];
 
   while (1) {
     if (i2sInputFlushScheduled) {
@@ -323,13 +394,77 @@ void micTask(void *parameter) {
       i2sInput.flush();
     }
 
-    if (webSocket.isConnected()) {
-      // ALWAYS send mic frames (full-duplex)
-      micToWsCopier.copyBytes(MIC_COPY_SIZE);
-      vTaskDelay(1);
-    } else {
+    if (!webSocket.isConnected()) {
       vTaskDelay(10);
+      continue;
     }
+
+    // --- Read one 20 ms stereo frame ---
+    size_t got = i2sInput.readBytes((uint8_t*)interleaved, MIC_STEREO_BYTES);
+    if (got < (size_t)MIC_STEREO_BYTES) {
+      vTaskDelay(1);
+      continue;
+    }
+
+    // --- Deinterleave: Left = near mic, Right = reference mic ---
+    // NOTE: If channels appear swapped on your hardware, swap assignments below.
+    for (int i = 0, j = 0; i < MIC_COPY_SAMPLES; ++i, j += 2) {
+      int16_t l = interleaved[j + 0]; // Left slot (near mic)
+      int16_t r = interleaved[j + 1]; // Right slot (reference mic)
+      micNear[i] = l;
+      refRaw[i]  = r;
+    }
+    
+    // Debug: Print channel levels occasionally (every 200 frames = 4 seconds)
+    static int debugCounter = 0;
+    if (++debugCounter >= 200) {
+      debugCounter = 0;
+      long leftSum = 0, rightSum = 0;
+      for (int i = 0; i < MIC_COPY_SAMPLES; i++) {
+        leftSum += abs(micNear[i]);
+        rightSum += abs(refRaw[i]);
+      }
+      Serial.printf("Channels - Left(near): %ld, Right(ref): %ld\n", leftSum, rightSum);
+    }
+
+    // --- Reference alignment & gain ---
+    applyRefDelay(refRaw, MIC_COPY_SAMPLES, refDelayed);
+
+    // --- AEC (if enabled and initialized), else pass-through near ---
+    if (echoCancellationEnabled && aecInitialized) {
+      dsp.processAEC(micNear, refDelayed, aecOut);
+      // Debug: Show AEC is active occasionally (every 5 seconds)
+      static int aecDebugCounter = 0;
+      if (++aecDebugCounter >= 250) { // Every 5 seconds
+        aecDebugCounter = 0;
+        Serial.println("AEC processing active");
+      }
+    } else {
+      memcpy(aecOut, micNear, MIC_COPY_SAMPLES * sizeof(int16_t));
+      // Debug: Show AEC is bypassed occasionally (every 5 seconds)
+      static int bypassDebugCounter = 0;
+      if (++bypassDebugCounter >= 250) { // Every 5 seconds
+        bypassDebugCounter = 0;
+        Serial.printf("AEC bypassed - enabled:%d, initialized:%d\n", echoCancellationEnabled, aecInitialized);
+      }
+    }
+
+    // --- Optional post-AEC preprocess (denoise/AGC) ---
+    if (preInitialized) {
+      memcpy(postProc, aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
+      dsp.preprocessMicAudio(postProc);
+      // Send post-processed mono frame to server
+      if (timeIsBefore(micTxUnmuteAt)) {
+        // warm-up mute active: drop
+      } else {
+        wsStream.write((uint8_t*)postProc, MIC_COPY_SAMPLES * sizeof(int16_t));
+      }
+    } else {
+      if (!timeIsBefore(micTxUnmuteAt)) {
+        wsStream.write((uint8_t*)aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
+      }
+    }
+    vTaskDelay(2); // Give other tasks more CPU time
   }
 }
 
@@ -338,7 +473,7 @@ void vadTask(void *parameter) {
   Serial.println("Starting VAD task...");
   
   // Initialize SpeexDSP preprocessing for VAD
-  if (!dsp.beginMicPreprocess(MIC_COPY_SIZE / 2, SAMPLE_RATE)) {
+  if (!dsp.beginMicPreprocess(MIC_COPY_SAMPLES, SAMPLE_RATE)) {
     Serial.println("VAD preprocessing initialization failed!");
     vTaskDelete(NULL);
     return;
@@ -371,12 +506,12 @@ void vadTask(void *parameter) {
   Serial.println("VAD I2S initialized successfully");
   
   // Buffer for VAD processing
-  int16_t audioSamples[MIC_COPY_SIZE / 2];
+  int16_t audioSamples[MIC_COPY_SAMPLES];
   
   while (1) {
     if (vadEnabled) {
       // Read audio data directly from I2S
-      size_t bytesRead = vadI2S.readBytes((uint8_t*)audioSamples, MIC_COPY_SIZE);
+      size_t bytesRead = vadI2S.readBytes((uint8_t*)audioSamples, MIC_COPY_SAMPLES * sizeof(int16_t));
       
       if (bytesRead > 0) {
         // Calculate RMS first to see signal level
