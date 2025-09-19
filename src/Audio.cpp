@@ -265,8 +265,8 @@ void audioStreamTask(void *parameter) {
 
 // ---------------- MIC → WS PIPELINE ----------------
 // Stereo capture for 2x INMP441 on one I2S bus (Left=near, Right=ref)
-// 20 ms @ 24 kHz => 480 samples per channel; stereo bytes = 480 * 2ch * 2B = 1920
-const int MIC_COPY_SAMPLES = 480;           // per-channel samples for 20 ms @ 24 kHz
+// 20 ms @ 16 kHz => 320 samples per channel; stereo bytes = 320 * 2ch * 2B = 1280
+const int MIC_COPY_SAMPLES = 960;           // per-channel samples for 20 ms @ 16 kHz
 const int MIC_STEREO_BYTES = MIC_COPY_SAMPLES * 2 /*ch*/ * sizeof(int16_t);
 
 class WebsocketStream : public Print {
@@ -416,18 +416,22 @@ void micTask(void *parameter) {
       refRaw[i]  = l;  // Left channel is the reference microphone
     }
     
-    // Debug: Print channel levels and AEC status occasionally (every 100 frames = 2 seconds)
+    // Debug: Print channel levels and AEC status occasionally (every 50 frames = 1 second)
     static int debugCounter = 0;
-    if (++debugCounter >= 100) {
+    static unsigned long lastDebugTime = 0;
+    if (++debugCounter >= 50) {
       debugCounter = 0;
+      unsigned long now = millis();
       long nearSum = 0, refSum = 0;
       for (int i = 0; i < MIC_COPY_SAMPLES; i++) {
         nearSum += abs(micNear[i]);  // Right channel (voice)
         refSum += abs(refRaw[i]);    // Left channel (reference)
       }
-      Serial.printf("Channels - Right(near): %ld, Left(ref): %ld, AEC: %s\n", 
+      Serial.printf("Channels - Right(near): %ld, Left(ref): %ld, AEC: %s, FPS: %.1f\n", 
                     nearSum, refSum, 
-                    (echoCancellationEnabled && aecInitialized) ? "ON" : "OFF");
+                    (echoCancellationEnabled && aecInitialized) ? "ON" : "OFF",
+                    lastDebugTime > 0 ? 50000.0 / (now - lastDebugTime) : 0.0);
+      lastDebugTime = now;
     }
 
     // --- Reference alignment & gain ---
@@ -443,7 +447,7 @@ void micTask(void *parameter) {
       dsp.processAEC(micNear, refDelayed, aecOut);
       // Debug: Show AEC is active occasionally (every 5 seconds)
       static int aecDebugCounter = 0;
-      if (++aecDebugCounter >= 250) { // Every 5 seconds
+      if (++aecDebugCounter >= 250) { // Every 5 seconds (250 frames * 20ms = 5s)
         aecDebugCounter = 0;
         Serial.println("AEC processing active");
       }
@@ -451,7 +455,7 @@ void micTask(void *parameter) {
       memcpy(aecOut, micNear, MIC_COPY_SAMPLES * sizeof(int16_t));
       // Debug: Show AEC is bypassed occasionally (every 5 seconds)
       static int bypassDebugCounter = 0;
-      if (++bypassDebugCounter >= 250) { // Every 5 seconds
+      if (++bypassDebugCounter >= 250) { // Every 5 seconds (250 frames * 20ms = 5s)
         bypassDebugCounter = 0;
         Serial.printf("AEC bypassed - enabled:%d, initialized:%d\n", echoCancellationEnabled, aecInitialized);
       }
@@ -469,6 +473,7 @@ void micTask(void *parameter) {
       }
     } else {
       if (!timeIsBefore(micTxUnmuteAt)) {
+        // Send only the near microphone (mono) to match server expectations
         wsStream.write((uint8_t*)aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
       }
     }
