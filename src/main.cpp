@@ -268,15 +268,15 @@ void setup()
     );
 
     // Create VAD task
-    // xTaskCreatePinnedToCore(
-    //     vadTask,           // Function
-    //     "VAD Task",        // Name
-    //     4096,              // Stack size
-    //     NULL,              // Parameters
-    //     2,                 // Priority
-    //     &vadTaskHandle,    // Handle
-    //     1                  // Core 1 (application core)
-    // );
+    xTaskCreatePinnedToCore(
+        vadTask,           // Function
+        "VAD Task",        // Name
+        4096,              // Stack size
+        NULL,              // Parameters
+        0,                 // Priority (lowest possible)
+        &vadTaskHandle,    // Handle
+        1                  // Core 1 (application core)
+    );
 
     // Initialize VAD (Voice Activity Detection)
     vadEnabled = true;

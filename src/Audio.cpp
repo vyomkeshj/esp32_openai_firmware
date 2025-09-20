@@ -269,6 +269,10 @@ void audioStreamTask(void *parameter) {
 const int MIC_COPY_SAMPLES = 960;           // per-channel samples for 20 ms @ 16 kHz
 const int MIC_STEREO_BYTES = MIC_COPY_SAMPLES * 2 /*ch*/ * sizeof(int16_t);
 
+// Shared buffer for VAD processing (AEC-filtered audio)
+int16_t sharedVadBuffer[MIC_COPY_SAMPLES];
+volatile bool newVadData = false;
+
 class WebsocketStream : public Print {
 public:
   size_t write(uint8_t b) override {
@@ -461,21 +465,13 @@ void micTask(void *parameter) {
       }
     }
 
-    // --- Optional post-AEC preprocess (denoise/AGC) ---
-    if (preInitialized) {
-      memcpy(postProc, aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
-      dsp.preprocessMicAudio(postProc);
-      // Send post-processed mono frame to server
-      if (timeIsBefore(micTxUnmuteAt)) {
-        // warm-up mute active: drop
-      } else {
-        wsStream.write((uint8_t*)postProc, MIC_COPY_SAMPLES * sizeof(int16_t));
-      }
-    } else {
-      if (!timeIsBefore(micTxUnmuteAt)) {
-        // Send only the near microphone (mono) to match server expectations
-        wsStream.write((uint8_t*)aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
-      }
+    // --- Copy AEC output to shared VAD buffer ---
+    memcpy(sharedVadBuffer, aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
+    newVadData = true;
+
+    // --- Send AEC-filtered mono frame to server ---
+    if (!timeIsBefore(micTxUnmuteAt)) {
+      wsStream.write((uint8_t*)aecOut, MIC_COPY_SAMPLES * sizeof(int16_t));
     }
     vTaskDelay(1); // Reduced delay to prevent choppy audio
   }
@@ -493,92 +489,51 @@ void vadTask(void *parameter) {
   }
   
   dsp.enableMicVAD(true);
-  dsp.setMicVADThreshold(50); // More sensitive
+  dsp.setMicVADThreshold(90); // Much less sensitive
   dsp.enableMicNoiseSuppression(true);
-  dsp.setMicNoiseSuppressionLevel(-20); // Less aggressive noise suppression
-  Serial.println("VAD preprocessing initialized with threshold 20 and light noise suppression");
-  
-  // Create separate I2S stream for VAD
-  I2SStream vadI2S;
-  auto i2sConfig = vadI2S.defaultConfig(RX_MODE);
-  i2sConfig.bits_per_sample  = BITS_PER_SAMPLE;   // 16-bit PCM
-  i2sConfig.sample_rate      = SAMPLE_RATE;       // 16000 Hz
-  i2sConfig.channels         = CHANNELS;          // Mono
-  i2sConfig.i2s_format       = I2S_STD_FORMAT;
-  i2sConfig.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT;
-  i2sConfig.pin_bck          = I2S_SCK;
-  i2sConfig.pin_ws           = I2S_WS;
-  i2sConfig.pin_data         = I2S_SD;
-  i2sConfig.port_no          = I2S_PORT_IN;
-  
-  if (!vadI2S.begin(i2sConfig)) {
-    Serial.println("VAD I2S initialization failed!");
-    vTaskDelete(NULL);
-    return;
-  }
-  Serial.println("VAD I2S initialized successfully");
-  
-  // Buffer for VAD processing
-  int16_t audioSamples[MIC_COPY_SAMPLES];
+  dsp.setMicNoiseSuppressionLevel(-20);
+  Serial.println("VAD initialized on AEC-filtered audio (low priority, less sensitive)");
   
   while (1) {
-    if (vadEnabled) {
-      // Read audio data directly from I2S
-      size_t bytesRead = vadI2S.readBytes((uint8_t*)audioSamples, MIC_COPY_SAMPLES * sizeof(int16_t));
+    if (vadEnabled && newVadData) {
+      // Small delay to ensure audio playback gets priority
+      vTaskDelay(5);
       
-      if (bytesRead > 0) {
-        // Calculate RMS first to see signal level
-        long sum = 0;
-        int sampleCount = bytesRead / 2; // Convert bytes to 16-bit samples
-        for (int i = 0; i < sampleCount; i++) {
-          sum += (long)audioSamples[i] * audioSamples[i];
-        }
-        float rms = sqrt((float)sum / sampleCount);
+      // Process AEC-filtered audio from shared buffer
+      dsp.preprocessMicAudio(sharedVadBuffer);
+      
+      // Check for voice activity
+      if (dsp.isMicVoiceDetected()) {
+        static unsigned long lastVADTime = 0;
+        static unsigned long voiceDetectedTime = 0;
+        unsigned long now = millis();
         
-        // Only process if we have enough samples (at least 160 samples = 10ms at 16kHz)
-        if (sampleCount >= 160) {
-          // Process audio through SpeexDSP preprocessing (includes VAD)
-          dsp.preprocessMicAudio(audioSamples);
+        if (now - lastVADTime > 3000) { // 3 second debounce - much less aggressive
+          lastVADTime = now;
+          voiceDetectedTime = now;
+          Serial.println("Voice detected on AEC-filtered audio! Stopping playback");
           
-          // Check for voice activity using SpeexDSP VAD
-          if (dsp.isMicVoiceDetected()) {
-            // Only trigger if signal is strong enough (RMS > 500) and enough time has passed
-            static unsigned long lastVADTime = 0;
-            static unsigned long voiceDetectedTime = 0;
-            unsigned long now = millis();
-            
-            if (rms > 500.0f && now - lastVADTime > 1000) { // Lower RMS threshold, 1 second debounce
-              lastVADTime = now;
-              voiceDetectedTime = now;
-              Serial.println("Voice detected! Stopping playback");
-              
-              // Temporarily disable playback
-              playbackActive = false;
-              
-              // Clear the speaker buffer to stop current audio
-              audioBuffer.clear();
-              i2sOutputFlushScheduled = true;
-              
-              // Also flush volume streams and queue for immediate stop
-              volume.flush();
-              volumePitch.flush();
-              queue.flush();
-            }
-            
-            // Re-enable playback after 2 seconds of silence
-            if (voiceDetectedTime > 0 && now - voiceDetectedTime > 2000) {
-              playbackActive = true;
-              voiceDetectedTime = 0;
-              Serial.println("Re-enabling playback");
-            }
-          }
+          // Stop playback
+          playbackActive = false;
+          audioBuffer.clear();
+          i2sOutputFlushScheduled = true;
+          volume.flush();
+          volumePitch.flush();
+          queue.flush();
         }
-      } else {
-        // No data available, wait a bit
-        vTaskDelay(1);
+        
+        // Re-enable playback after 2 seconds of silence
+        if (voiceDetectedTime > 0 && now - voiceDetectedTime > 2000) {
+          playbackActive = true;
+          voiceDetectedTime = 0;
+          Serial.println("Re-enabling playback");
+        }
       }
+      
+      newVadData = false; // Mark data as processed
+      vTaskDelay(20); // Longer delay after processing to give other tasks CPU time
     } else {
-      // VAD disabled, wait longer
+      // No new data or VAD disabled, wait much longer to reduce CPU usage
       vTaskDelay(100);
     }
   }
